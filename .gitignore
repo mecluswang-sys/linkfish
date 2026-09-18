@@ -1,0 +1,25 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Local editor and tool settings
+.vscode/
+.idea/
+
+# Logs and local runtime files
+*.log
+
+# Downloaded binary dependencies
+# VB-Cable.zip
