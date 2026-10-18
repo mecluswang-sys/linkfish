@@ -13,13 +13,19 @@ ENV/
 build/
 dist/
 *.egg-info/
+*.exe
+
+# PyInstaller 自动生成的 spec（可用 README 里的命令重建）
+# macOS 版 spec 含 BUNDLE/info_plist 等手工配置，必须保留
+*.spec
+!macos/WoWFishing-macOS.spec
 
 # Local editor and tool settings
 .vscode/
 .idea/
 
+# OS generated files
+.DS_Store
+
 # Logs and local runtime files
 *.log
-
-# Downloaded binary dependencies
-# VB-Cable.zip

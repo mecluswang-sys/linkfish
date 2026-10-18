@@ -1,0 +1,8 @@
+numpy
+PySide6
+pyqtgraph
+sounddevice
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz
+pyobjc-framework-ApplicationServices
+pyobjc-framework-AVFoundation
