@@ -50,6 +50,10 @@ app = BUNDLE(
     icon=None,
     bundle_identifier="com.linkfish.wowfishing.mac",
     info_plist={
+        # 发布版本号（对外展示）。
+        "CFBundleShortVersionString": "1.0",
+        # 构建版本号（可与展示版本保持一致）。
+        "CFBundleVersion": "1.0",
         "NSMicrophoneUsageDescription": "用于监听游戏音频并检测上钩声音。",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "11.0",

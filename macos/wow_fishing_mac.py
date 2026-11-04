@@ -1,4 +1,4 @@
-"""WoW 钓鱼助手 macOS 版（前台模式）。
+"""养鱼助手。
 
 这是独立于 Windows 版 program.py 的一份实现，依赖与运行环境也完全独立。
 核心差异：macOS 没有 PostMessage 这种向后台窗口投递按键的机制，
@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
@@ -27,9 +26,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -77,12 +73,6 @@ NAMED_KEY_CODES = {
     "num5": 87, "num6": 88, "num7": 89, "num8": 91, "num9": 92,
 }
 
-# 事件注入方式。前两种需要游戏在前台，第三种为实验性的定向投递。
-POST_MODE_HID = "HID 层（推荐）"
-POST_MODE_SESSION = "会话层"
-POST_MODE_PID = "指定进程（实验）"
-
-
 def resolve_key_code(key_text):
     """把用户输入的按键文本解析为 macOS 虚拟键码。"""
     token = key_text.strip().casefold()
@@ -96,8 +86,8 @@ def resolve_key_code(key_text):
 class WowFishingMacGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("WoW 钓鱼助手 (macOS)")
-        self.resize(1150, 800)
+        self.setWindowTitle("养鱼助手")
+        self.resize(1020, 580)
         self.move(self.screen().availableGeometry().center() - self.frameGeometry().center())
 
         self.target_pid = None
@@ -111,16 +101,10 @@ class WowFishingMacGui(QMainWindow):
         self.is_running = False
         self.is_paused = False
         self.is_cooling_down = False
-        self.bite_threshold = 0.3
+        self.bite_threshold = 0.2
         self.start_time = 0.0
         self.key_hold_range = (0.14, 0.24)
         self.key_gap_range = (0.10, 0.18)
-        self.auto_macro_delay_ms_range = (250, 450)
-        self.auto_macro_script = '/script T,F=T or 0,F or CreateFrame("frame")if X then X=nil else X=function()local t=GetTime()if t-T>1 then StaticPopup1Button1:Click()T=t end end end F:SetScript ("OnUpdate",X)'
-
-        self.auto_keys = []
-        self.auto_key_queue = []
-        self.auto_key_sending = False
 
         self.init_ui()
         self.refresh_app_list()
@@ -217,17 +201,8 @@ class WowFishingMacGui(QMainWindow):
         event = Quartz.CGEventCreateKeyboardEvent(None, key_code, key_down)
         if event is None:
             return
-
-        mode = self.post_mode_combo.currentText()
-        if mode == POST_MODE_PID:
-            application = self.find_target_application()
-            if application is None:
-                return
-            Quartz.CGEventPostToPid(application.processIdentifier(), event)
-        elif mode == POST_MODE_SESSION:
-            Quartz.CGEventPost(Quartz.kCGSessionEventTap, event)
-        else:
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        # UI 已移除注入方式选择，统一走 HID 事件层，行为最稳定。
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
     def send_key(self, key_text):
         """同步发送一次按键（按下 → 保持 → 抬起）。"""
@@ -246,7 +221,8 @@ class WowFishingMacGui(QMainWindow):
 
     # ----------------- 运行状态 -----------------
     def requires_frontmost(self):
-        return self.post_mode_combo.currentText() != POST_MODE_PID
+        # 固定前台模式：切走游戏时暂停，切回后自动恢复。
+        return True
 
     def ensure_target_ready(self):
         """确认目标可用；不可用时停止，仅仅是失去前台时转为暂停。"""
@@ -260,8 +236,6 @@ class WowFishingMacGui(QMainWindow):
         if self.requires_frontmost() and not self.is_target_frontmost():
             if not self.is_paused:
                 self.is_paused = True
-                self.auto_key_queue.clear()
-                self.auto_key_sending = False
                 self.status_label.setText("状态: 已暂停（游戏不在前台）")
                 self.log("游戏已离开前台，暂停发送按键；切回游戏后自动恢复。")
             return False
@@ -281,8 +255,6 @@ class WowFishingMacGui(QMainWindow):
         self.is_running = False
         self.is_paused = False
         self.is_cooling_down = False
-        self.auto_key_queue.clear()
-        self.auto_key_sending = False
         self.btn_toggle.setText("开启自动钓鱼")
         self.status_label.setText("状态: 已停止")
         self.update_toggle_button_style()
@@ -315,10 +287,6 @@ class WowFishingMacGui(QMainWindow):
         self.is_paused = False
         self.is_cooling_down = False
 
-        now = time.time()
-        for item in self.auto_keys:
-            item["last_time"] = now + item["interval"]
-
         self.log(f"任务启动，目标: {self.app_combo.currentText()}")
         if self.requires_frontmost():
             self.log("前台模式：切换到其他应用会暂停，切回游戏自动恢复。")
@@ -330,93 +298,6 @@ class WowFishingMacGui(QMainWindow):
         self.btn_toggle.setText("停止自动钓鱼")
         self.status_label.setText("状态: 运行中")
         self.update_toggle_button_style()
-
-    # ----------------- 定时按键 -----------------
-    def format_auto_key_interval(self, seconds):
-        minutes = seconds / 60
-        if seconds % 60 == 0 and minutes < 60:
-            return f"{int(minutes)} 分钟"
-        return f"{seconds} 秒"
-
-    def add_auto_key_item(self):
-        key = self.add_key_input.text().strip()
-        if not key:
-            QMessageBox.warning(self, "警告", "按键不能为空！")
-            return
-        if resolve_key_code(key) is None:
-            QMessageBox.warning(self, "警告", f"macOS 暂不支持按键: [{key}]")
-            return
-
-        value = self.add_interval_input.value()
-        interval_seconds = value * 60 if self.add_time_unit_combo.currentText() == "分钟" else value
-        self.auto_keys.append(
-            {"key": key, "interval": interval_seconds, "last_time": 0.0, "enabled": True}
-        )
-
-        row = self.auto_key_table.rowCount()
-        self.auto_key_table.insertRow(row)
-        self.auto_key_table.setItem(row, 0, QTableWidgetItem(key))
-        self.auto_key_table.setItem(
-            row, 1, QTableWidgetItem(self.format_auto_key_interval(interval_seconds))
-        )
-        self.auto_key_table.setItem(row, 2, QTableWidgetItem("等待运行"))
-        self.log(f"添加定时按键: [{key}]，间隔: {self.format_auto_key_interval(interval_seconds)}")
-
-    def del_auto_key_item(self):
-        current_row = self.auto_key_table.currentRow()
-        if current_row >= 0:
-            del self.auto_keys[current_row]
-            self.auto_key_table.removeRow(current_row)
-            self.log("删除了选中的定时按键配置。")
-
-    def check_and_trigger_auto_keys(self):
-        if not self.is_running or self.is_cooling_down:
-            return
-
-        now = time.time()
-        due_keys = []
-        for idx, item in enumerate(self.auto_keys):
-            if item["last_time"] <= 0.0:
-                item["last_time"] = now + item["interval"]
-                continue
-            if now >= item["last_time"]:
-                due_keys.append((idx, item))
-                item["last_time"] = now + item["interval"]
-
-        for idx, item in due_keys:
-            interval_text = self.format_auto_key_interval(int(item["interval"]))
-            self.log(f"⌛ 触发定时按键: [{item['key']}] (间隔: {interval_text})")
-            self.auto_key_table.setItem(idx, 2, QTableWidgetItem(time.strftime("%H:%M:%S 已触发")))
-            self.auto_key_queue.append(item["key"])
-
-        self.send_next_auto_key()
-
-    def send_next_auto_key(self):
-        if self.auto_key_sending or not self.auto_key_queue:
-            return
-        if not self.ensure_target_ready():
-            self.auto_key_queue.clear()
-            return
-
-        key = self.auto_key_queue.pop(0).strip()
-        key_code = resolve_key_code(key)
-        if key_code is None:
-            self.send_next_auto_key()
-            return
-
-        self.auto_key_sending = True
-        self.post_key(key_code, True)
-        hold_ms = int(random.uniform(*self.key_hold_range) * 1000)
-        gap_ms = int(random.uniform(*self.key_gap_range) * 1000)
-        QTimer.singleShot(hold_ms, lambda: self.release_auto_key(key_code, gap_ms))
-
-    def release_auto_key(self, key_code, gap_ms):
-        self.post_key(key_code, False)
-        QTimer.singleShot(gap_ms, self.continue_auto_key_queue)
-
-    def continue_auto_key_queue(self):
-        self.auto_key_sending = False
-        self.send_next_auto_key()
 
     # ----------------- 音频 -----------------
     def refresh_audio_devices(self):
@@ -489,7 +370,6 @@ class WowFishingMacGui(QMainWindow):
         if not self.ensure_target_ready():
             return
 
-        self.check_and_trigger_auto_keys()
         if self.is_cooling_down:
             return
 
@@ -501,15 +381,7 @@ class WowFishingMacGui(QMainWindow):
             self.send_key(self.key_interact.text())
             self.is_cooling_down = True
             base_cooldown_ms = random.randint(1000, 6000)
-
-            if self.auto_macro_checkbox.isChecked():
-                macro_delay_ms = random.randint(*self.auto_macro_delay_ms_range)
-                QTimer.singleShot(
-                    macro_delay_ms, lambda: self.send_key(self.auto_macro_key.text())
-                )
-                QTimer.singleShot(base_cooldown_ms + macro_delay_ms, self.finish_cooldown)
-            else:
-                QTimer.singleShot(base_cooldown_ms, self.finish_cooldown)
+            QTimer.singleShot(base_cooldown_ms, self.finish_cooldown)
 
     def finish_cooldown(self):
         self.is_cooling_down = False
@@ -547,7 +419,9 @@ class WowFishingMacGui(QMainWindow):
         self.setCentralWidget(main_widget)
         layout = QHBoxLayout(main_widget)
         control_layout = QVBoxLayout()
-        label_width = 110
+        control_layout.setContentsMargins(6, 6, 6, 6)
+        control_layout.setSpacing(6)
+        label_width = 96
 
         self.app_combo = QComboBox()
         btn_refresh = QPushButton("刷新应用列表")
@@ -583,20 +457,9 @@ class WowFishingMacGui(QMainWindow):
         control_layout.addLayout(thresh_row)
 
         self.key_cast = QLineEdit("1")
-        self.key_cast.setMaximumWidth(45)
+        self.key_cast.setMaximumWidth(38)
         self.key_interact = QLineEdit("f")
-        self.key_interact.setMaximumWidth(45)
-
-        self.auto_macro_checkbox = QCheckBox("自动确认宏")
-        self.auto_macro_help_btn = QPushButton("!")
-        self.auto_macro_help_btn.setFixedSize(22, 22)
-        self.auto_macro_help_btn.setToolTip("查看自动确认宏")
-        self.auto_macro_help_btn.clicked.connect(self.show_auto_macro_dialog)
-
-        self.auto_macro_key = QLineEdit("2")
-        self.auto_macro_key.setMaximumWidth(45)
-        self.auto_macro_key.setEnabled(False)
-        self.auto_macro_checkbox.toggled.connect(self.auto_macro_key.setEnabled)
+        self.key_interact.setMaximumWidth(38)
 
         key_row = QHBoxLayout()
         key_title = QLabel("4. 基础按键:")
@@ -606,73 +469,11 @@ class WowFishingMacGui(QMainWindow):
         key_row.addWidget(self.key_cast)
         key_row.addWidget(QLabel("起竿:"))
         key_row.addWidget(self.key_interact)
-        key_row.addWidget(self.auto_macro_checkbox)
-        key_row.addWidget(self.auto_macro_help_btn)
-        key_row.addWidget(QLabel("确认宏:"))
-        key_row.addWidget(self.auto_macro_key)
         key_row.addStretch()
         control_layout.addLayout(key_row)
 
-        self.post_mode_combo = QComboBox()
-        self.post_mode_combo.addItems([POST_MODE_HID, POST_MODE_SESSION, POST_MODE_PID])
-        self.post_mode_combo.setToolTip(
-            "前两种需要游戏在前台；“指定进程”为实验性后台投递，不一定被游戏接受。"
-        )
-        self.always_on_top_checkbox = QCheckBox("窗口置顶")
-        self.always_on_top_checkbox.setChecked(True)
-        self.always_on_top_checkbox.toggled.connect(self.toggle_always_on_top)
-
-        mode_row = QHBoxLayout()
-        mode_label = QLabel("5. 注入方式:")
-        mode_label.setFixedWidth(label_width)
-        mode_row.addWidget(mode_label)
-        mode_row.addWidget(self.post_mode_combo)
-        mode_row.addWidget(self.always_on_top_checkbox)
-        mode_row.addStretch()
-        control_layout.addLayout(mode_row)
-
-        auto_key_title = QLabel("6. 定时按键:")
-        auto_key_title.setFixedWidth(label_width)
-        self.add_key_input = QLineEdit("3")
-        self.add_key_input.setFixedWidth(42)
-        self.add_time_unit_combo = QComboBox()
-        self.add_time_unit_combo.addItems(["秒", "分钟"])
-        self.add_time_unit_combo.setFixedWidth(70)
-        self.add_interval_input = QSpinBox()
-        self.add_interval_input.setRange(1, 86400)
-        self.add_interval_input.setValue(30)
-        self.add_interval_input.setFixedWidth(70)
-        self.add_time_unit_combo.currentIndexChanged.connect(self.update_auto_key_unit_range)
-
-        btn_add_auto_key = QPushButton("添加")
-        btn_add_auto_key.setFixedWidth(52)
-        btn_add_auto_key.clicked.connect(self.add_auto_key_item)
-        btn_del_auto_key = QPushButton("删除选中")
-        btn_del_auto_key.setFixedWidth(78)
-        btn_del_auto_key.clicked.connect(self.del_auto_key_item)
-
-        auto_key_row = QHBoxLayout()
-        auto_key_row.setSpacing(8)
-        auto_key_row.addWidget(auto_key_title)
-        auto_key_row.addWidget(QLabel("键:"))
-        auto_key_row.addWidget(self.add_key_input)
-        auto_key_row.addWidget(QLabel("间隔:"))
-        auto_key_row.addWidget(self.add_interval_input)
-        auto_key_row.addWidget(self.add_time_unit_combo)
-        auto_key_row.addWidget(btn_add_auto_key)
-        auto_key_row.addWidget(btn_del_auto_key)
-        auto_key_row.addStretch(1)
-        control_layout.addLayout(auto_key_row)
-
-        self.auto_key_table = QTableWidget(0, 3)
-        self.auto_key_table.setHorizontalHeaderLabels(["按键", "间隔", "状态"])
-        self.auto_key_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.auto_key_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.auto_key_table.setFixedHeight(110)
-        control_layout.addWidget(self.auto_key_table)
-
         self.btn_toggle = QPushButton("开启自动钓鱼")
-        self.btn_toggle.setMinimumSize(170, 44)
+        self.btn_toggle.setMinimumSize(156, 40)
         self.update_toggle_button_style()
         self.btn_toggle.clicked.connect(self.toggle_fishing)
         toggle_row = QHBoxLayout()
@@ -692,7 +493,7 @@ class WowFishingMacGui(QMainWindow):
 
         control_widget = QWidget()
         control_widget.setLayout(control_layout)
-        control_widget.setFixedWidth(560)
+        control_widget.setFixedWidth(400)
         layout.addWidget(control_widget)
 
         plot_layout = QVBoxLayout()
@@ -705,41 +506,10 @@ class WowFishingMacGui(QMainWindow):
         self.plot_wave.addItem(self.thresh_line)
         plot_layout.addWidget(self.plot_wave)
         layout.addLayout(plot_layout, stretch=0)
-        layout.setStretch(0, 4)
-        layout.setStretch(1, 2)
+        layout.setStretch(0, 3)
+        layout.setStretch(1, 3)
 
         self.toggle_always_on_top(True)
-
-    def update_auto_key_unit_range(self):
-        unit = self.add_time_unit_combo.currentText()
-        self.add_interval_input.setRange(1, 86400 if unit == "秒" else 1440)
-
-    def show_auto_macro_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("自动确认宏")
-        dialog.resize(760, 220)
-
-        dialog_layout = QVBoxLayout(dialog)
-        macro_text = QTextEdit()
-        macro_text.setReadOnly(True)
-        macro_text.setPlainText(self.auto_macro_script)
-        dialog_layout.addWidget(macro_text)
-
-        action_row = QHBoxLayout()
-        action_row.addStretch()
-        btn_copy = QPushButton("复制宏")
-        btn_close = QPushButton("关闭")
-
-        def copy_macro():
-            QApplication.clipboard().setText(self.auto_macro_script)
-            self.log("已复制自动确认宏到剪贴板。")
-
-        btn_copy.clicked.connect(copy_macro)
-        btn_close.clicked.connect(dialog.accept)
-        action_row.addWidget(btn_copy)
-        action_row.addWidget(btn_close)
-        dialog_layout.addLayout(action_row)
-        dialog.exec()
 
     def closeEvent(self, event):
         self.is_running = False
